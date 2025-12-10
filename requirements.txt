@@ -1,4 +1,4 @@
-aiogram==3.13
+aiogram
 aiohttp
 beautifulsoup4
 python-dotenv
