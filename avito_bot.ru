@@ -13,8 +13,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
+# Загружаем токен и ID из переменных Render
 load_dotenv()
-
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.getenv("CHAT_ID"))
 
@@ -23,12 +23,14 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 logging.basicConfig(level=logging.INFO)
 
+# Состояния диалога
 class AddTask(StatesGroup):
     url = State()
     name = State()
     min_price = State()
     max_price = State()
 
+# Хранилище заданий
 tasks = {}
 TASKS_FILE = "tasks.json"
 
@@ -44,22 +46,22 @@ def save_tasks():
 
 tasks = load_tasks()
 
-def main_keyboard():
-    kb = [
+# Клавиатуры
+def main_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Добавить задание", callback_data="add_task")],
         [InlineKeyboardButton(text="Список заданий", callback_data="list_tasks")],
         [InlineKeyboardButton(text="Обновить всё сейчас", callback_data="force_check")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+    ])
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer("Привет! Я твой Avito-снайпер", reply_markup=main_keyboard())
+    await message.answer("Привет! Я твой личный Avito-снайпер", reply_markup=main_kb())
 
 @dp.callback_query(lambda c: c.data == "add_task")
-async def add_task(callback: types.CallbackQuery, state: FSMContext):
+async def cmd_add_task(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Пришли ссылку Avito с фильтрами и сортировкой «По дате»")
     await state.set_state(AddTask.url)
     await callback.answer()
@@ -70,26 +72,27 @@ async def get_url(message: types.Message, state: FSMContext):
         await message.answer("Это не ссылка Avito, попробуй ещё раз")
         return
     await state.update_data(url=message.text.strip())
-    await message.answer("Как назовём задание? (например: 1-к квартира ЦАО до 60к)")
+    await message.answer("Как назовём задание?\nнапример: «1-кк Москва до 65к»")
     await state.set_state(AddTask.name)
 
 @dp.message(AddTask.name)
 async def get_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("Минимальная цена (или 0 — без ограничения)")
+    await state.update_data(name=message.text.strip())
+    await message.answer("Минимальная цена?\n0 — если без минимума")
     await state.set_state(AddTask.min_price)
 
 @dp.message(AddTask.min_price)
 async def get_min(message: types.Message, state: FSMContext):
     text = message.text.replace(" ", "").replace("₽", "")
-    min_p = int(text) if text.isdigit() and int(text) > 0 else None
-    await state.update_data(min_price=min_p)
-    await message.answer("Максимальная цена (обязательно, например 65000)")
+    min_p = int(text) if text.isdigit() else 0)
+    await state.update_data(min_price=min_p if min_p > 0 else None)
+    await message.answer("Максимальная цена?\nобязательно число, например 65000")
     await state.set_state(AddTask.max_price)
 
 @dp.message(AddTask.max_price)
 async def get_max(message: types.Message, state: FSMContext):
-    if not message.text.replace(" ", "").isdigit():
+    text = message.text.replace(" ", "")
+    if not text.isdigit():
         await message.answer("Напиши просто число")
         return
     data = await state.get_data()
@@ -97,87 +100,84 @@ async def get_max(message: types.Message, state: FSMContext):
     tasks[task_id] = {
         "name": data["name"],
         "url": data["url"],
-        "min_price": data["min_price"],
-        "max_price": int(message.text.replace(" ", "")),
+        "min_price": data.get("min_price"),
+        "max_price": int(text),
         "seen": [],
         "active": True
     }
     save_tasks()
-    await message.answer(f"Задание «{data['name']}» создано и запущено!", reply_markup=main_keyboard())
+    await message.answer(f"Задание «{data['name']}» создано и запущено!", reply_markup=main_kb())
     await state.clear()
 
 @dp.callback_query(lambda c: c.data == "list_tasks")
 async def list_tasks(callback: types.CallbackQuery):
     if not tasks:
-        await callback.message.edit_text("Нет заданий", reply_markup=main_keyboard())
+        await callback.message.edit_text("Нет заданий", reply_markup=main_kb())
         return
     text = "Твои задания:\n\n"
-    kb = []
     for tid, t in tasks.items():
-        status = "ВКЛ" if t.get("active", True) else "ВЫКЛ"
-        text += f"<b>{tid}. {t['name']}</b> — до {t['max_price']:,} ₽ — {status}\n"
-        kb.append([InlineKeyboardButton(text=f"{tid}. {t['name'][:35]}…", callback_data=f"show_{tid}")])
-    kb.append([InlineKeyboardButton(text="Назад", callback_data="back")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        minp = f"{t['min_price']:,} ₽ — " if t['min_price'] else ""
+        text += f"<b>{tid}. {t['name']}</b>\n{minp}{t['max_price']:,} ₽\n\n"
+    await callback.message.edit_text(text, reply_markup=main_kb())
 
-@dp.callback_query(lambda c: c.data == "back")
-async def back(callback: types.CallbackQuery):
-    await callback.message.edit_text("Главное меню", reply_markup=main_keyboard())
-
-async def checker():
+# Мониторинг Avito
+async def watcher():
     async with aiohttp.ClientSession() as session:
         while True:
-            for task_id, task in tasks.items():
+            for task in tasks.values():
                 if not task.get("active", True):
                     continue
                 try:
-                    async with session.get(task["url"], timeout=20) as resp:
-                        if resp.status != 200:
-                            continue
-                        html = await resp.text()
+                    async with session.get(task["url"], timeout=25) as r:
+                        if r.status != 200: continue
+                        html = await r.text()
                     soup = BeautifulSoup(html, "html.parser")
-                    items = soup.find_all("div", {"data-marker": "item"})
-                    for item in reversed(items):
-                        a = item.find("a", {"data-marker": "item-title"})
-                        if not a:
-                            continue
-                        link = "https://www.avito.ru" + a["href"]
-                        ad_id = re.search(r"_(\d+)", link).group(1)
-                        if ad_id in task["seen"]:
-                            continue
-                        price_tag = item.find("meta", {"itemprop": "price"})
-                        if not price_tag:
-                            continue
-                        price = int(price_tag["content"])
-                        if task["min_price"] and price < task["min_price"]:
-                            continue
-                        if price > task["max_price"]:
-                            continue
-                        title = a.get("title", "Без названия")
-                        location = item.find("div", {"data-marker": "item-address"})
-                        location = location.get_text(strip=True) if location else ""
-                        photo = item.find("img", {"itemprop": "image"})
-                        photo_url = photo["src"] if photo and "stub" not in photo.get("src", "") else None
+                    for item in reversed(soup.find_all("div", {"data-marker": "item"})):
+                        try:
+                            a = item.find("a", {"data-marker": "item-title"})
+                            if not a: continue
+                            link = "https://www.avito.ru" + a["href"]
+                            ad_id = re.search(r"_(\d+)", link).group(1)
+                            if ad_id in task["seen"]: continue
 
-                        msg = f"<b>Новое • {task['name']}</b>\n\n<b>{title}</b>\n<b>{price:,} ₽</b>\n{location}\n\n{link}"
+                            price_tag = item.find("meta", {"itemprop": "price"})
+                            if not price_tag: continue
+                            price = int(price_tag["content"])
 
-                        if photo_url:
-                            await bot.send_photo(ADMIN_ID, photo_url, caption=msg)
-                        else:
-                            await bot.send_message(ADMIN_ID, msg)
+                            if task["min_price"] and price < task["min_price"]: continue
+                            if price > task["max_price"]: continue
 
-                        task["seen"].append(ad_id)
-                        if len(task["seen"]) > 3000:
-                            task["seen"] = task["seen"][-2000:]
-                        save_tasks()
-                        await asyncio.sleep(1.5)
+                            title = a.get("title", "Без названия")
+                            loc = item.find("div", {"data-marker": "item-address"})
+                            location = loc.get_text(strip=True) if loc else ""
+
+                            photo = item.find("img", {"itemprop": "image"})
+                            photo_url = photo["src"] if photo and photo.get("src") and "stub" not in photo["src"] else None
+
+                            msg = f"<b>Новое • {task['name']}</b>\n\n<b>{title}</b>\n<b>{price:,} ₽</b>\n{location}\n\n{link}"
+
+                            if photo_url:
+                                await bot.send_photo(ADMIN_ID, photo_url, caption=msg)
+                            else:
+                                await bot.send_message(ADMIN_ID, msg)
+
+                            task["seen"].append(ad_id)
+                            if len(task["seen"]) > 3000:
+                                task["seen"] = task["seen"][-2000:]
+                            save_tasks()
+                            await asyncio.sleep(1.3)
+                        except:
+                            continue
                 except:
-                    continue
-            await asyncio.sleep(70)
+                    pass
+            await asyncio.sleep(75)
 
 async def main():
-    asyncio.create_task(checker())
-    await bot.send_message(ADMIN_ID, "Бот запущен и следит за Avito")
+    # Запускаем мониторинг в фоне
+    asyncio.create_task(watcher())
+    # Сообщаем, что бот живой
+    await bot.send_message(ADMIN_ID, "Бот успешно запущен и следит за Avito 24/7")
+    # Запускаем обработку сообщений
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
