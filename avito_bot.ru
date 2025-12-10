@@ -13,7 +13,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-# Загружаем токен и ID из переменных Render
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.getenv("CHAT_ID"))
@@ -23,14 +22,12 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 logging.basicConfig(level=logging.INFO)
 
-# Состояния диалога
 class AddTask(StatesGroup):
     url = State()
     name = State()
     min_price = State()
     max_price = State()
 
-# Хранилище заданий
 tasks = {}
 TASKS_FILE = "tasks.json"
 
@@ -46,54 +43,52 @@ def save_tasks():
 
 tasks = load_tasks()
 
-# Клавиатуры
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Добавить задание", callback_data="add_task")],
-        [InlineKeyboardButton(text="Список заданий", callback_data="list_tasks")],
-        [InlineKeyboardButton(text="Обновить всё сейчас", callback_data="force_check")]
+        [InlineKeyboardButton(text="Список заданий", callback_data="list_tasks")]
     ])
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer("Привет! Я твой личный Avito-снайпер", reply_markup=main_kb())
+    await message.answer("Avito-снайпер онлайн", reply_markup=main_kb())
 
 @dp.callback_query(lambda c: c.data == "add_task")
 async def cmd_add_task(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Пришли ссылку Avito с фильтрами и сортировкой «По дате»")
+    await callback.message.edit_text("Кидай ссылку Avito (с фильтрами и сортировкой «По дате»)")
     await state.set_state(AddTask.url)
     await callback.answer()
 
 @dp.message(AddTask.url)
 async def get_url(message: types.Message, state: FSMContext):
     if "avito.ru" not in message.text:
-        await message.answer("Это не ссылка Avito, попробуй ещё раз")
+        await message.answer("Это не ссылка Avito")
         return
     await state.update_data(url=message.text.strip())
-    await message.answer("Как назовём задание?\nнапример: «1-кк Москва до 65к»")
+    await message.answer("Назови задание\n(например: 1-кк ЦАО до 70к)")
     await state.set_state(AddTask.name)
 
 @dp.message(AddTask.name)
 async def get_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
-    await message.answer("Минимальная цена?\n0 — если без минимума")
+    await message.answer("Минимальная цена?\n(0 — если без ограничения")
     await state.set_state(AddTask.min_price)
 
 @dp.message(AddTask.min_price)
 async def get_min(message: types.Message, state: FSMContext):
     text = message.text.replace(" ", "").replace("₽", "")
-    min_p = int(text) if text.isdigit() else 0)
-    await state.update_data(min_price=min_p if min_p > 0 else None)
-    await message.answer("Максимальная цена?\nобязательно число, например 65000")
+    min_p = int(text) if text.isdigit() and int(text) > 0 else None
+    await state.update_data(min_price=min_p)
+    await message.answer("Максимальная цена?\n(обязательно число)")
     await state.set_state(AddTask.max_price)
 
 @dp.message(AddTask.max_price)
 async def get_max(message: types.Message, state: FSMContext):
     text = message.text.replace(" ", "")
     if not text.isdigit():
-        await message.answer("Напиши просто число")
+        await message.answer("Просто число, без букв")
         return
     data = await state.get_data()
     task_id = str(len(tasks) + 1)
@@ -106,21 +101,21 @@ async def get_max(message: types.Message, state: FSMContext):
         "active": True
     }
     save_tasks()
-    await message.answer(f"Задание «{data['name']}» создано и запущено!", reply_markup=main_kb())
+    await message.answer(f"Задание «{data['name']}» запущено!", reply_markup=main_kb())
     await state.clear()
 
 @dp.callback_query(lambda c: c.data == "list_tasks")
 async def list_tasks(callback: types.CallbackQuery):
     if not tasks:
-        await callback.message.edit_text("Нет заданий", reply_markup=main_kb())
+        await callback.message.edit_text("Пока пусто", reply_markup=main_kb())
         return
-    text = "Твои задания:\n\n"
+    text = "Активные задания:\n\n"
     for tid, t in tasks.items():
-        minp = f"{t['min_price']:,} ₽ — " if t['min_price'] else ""
-        text += f"<b>{tid}. {t['name']}</b>\n{minp}{t['max_price']:,} ₽\n\n"
+        minp = f"от {t['min_price']:,} ₽ " if t['min_price'] else ""
+        text += f"<b>{tid}. {t['name']}</b>\n{minp}— {t['max_price']:,} ₽\n\n"
     await callback.message.edit_text(text, reply_markup=main_kb())
 
-# Мониторинг Avito
+# Фоновый мониторинг
 async def watcher():
     async with aiohttp.ClientSession() as session:
         while True:
@@ -173,11 +168,8 @@ async def watcher():
             await asyncio.sleep(75)
 
 async def main():
-    # Запускаем мониторинг в фоне
     asyncio.create_task(watcher())
-    # Сообщаем, что бот живой
-    await bot.send_message(ADMIN_ID, "Бот успешно запущен и следит за Avito 24/7")
-    # Запускаем обработку сообщений
+    await bot.send_message(ADMIN_ID, "Бот запустился и начал мониторить Avito")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
